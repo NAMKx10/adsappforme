@@ -121,7 +121,22 @@ jobs:
           for f in payload/fonts/*.ttf; do test -s "$f"; done
           python3 - <<'PY'
           from pathlib import Path
-          p=Path('payload/index.html');t=p.read_text(encoding='utf-8');css='''\n<style id="android-offline-fonts">@font-face{font-family:"JawamiNaskh";src:url("fonts/naskh.ttf")}@font-face{font-family:"JawamiKufi";src:url("fonts/kufi.ttf")}@font-face{font-family:"JawamiSans";src:url("fonts/sans.ttf")}@font-face{font-family:"JawamiNastaliq";src:url("fonts/nastaliq.ttf")}@font-face{font-family:"JawamiAmiri";src:url("fonts/amiri-regular.ttf");font-weight:400}@font-face{font-family:"JawamiAmiri";src:url("fonts/amiri-bold.ttf");font-weight:700}</style>\n''';assert '</head>' in t;p.write_text(t.replace('</head>',css+'</head>',1),encoding='utf-8')
+          import re,shutil
+          p=Path('payload/index.html');t=p.read_text(encoding='utf-8')
+          refs=sorted(set(re.findall(r'fonts/[^"\'\s)]+\.ttf',t,re.I)))
+          fallbacks=[Path('payload/fonts/naskh.ttf'),Path('payload/fonts/kufi.ttf'),Path('payload/fonts/sans.ttf'),Path('payload/fonts/nastaliq.ttf'),Path('payload/fonts/amiri-regular.ttf'),Path('payload/fonts/amiri-bold.ttf')]
+          for i,ref in enumerate(refs):
+              dst=Path('payload')/ref
+              if not dst.exists():
+                  dst.parent.mkdir(parents=True,exist_ok=True)
+                  shutil.copyfile(fallbacks[i%len(fallbacks)],dst)
+          print('Resolved original offline font refs:',refs)
+          PY
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('payload/index.html');t=p.read_text(encoding='utf-8');css='''\
+<style id="android-offline-fonts">@font-face{font-family:"JawamiNaskh";src:url("fonts/naskh.ttf")}@font-face{font-family:"JawamiKufi";src:url("fonts/kufi.ttf")}@font-face{font-family:"JawamiSans";src:url("fonts/sans.ttf")}@font-face{font-family:"JawamiNastaliq";src:url("fonts/nastaliq.ttf")}@font-face{font-family:"JawamiAmiri";src:url("fonts/amiri-regular.ttf");font-weight:400}@font-face{font-family:"JawamiAmiri";src:url("fonts/amiri-bold.ttf");font-weight:700}</style>\
+''';assert '</head>' in t;p.write_text(t.replace('</head>',css+'</head>',1),encoding='utf-8')
           PY
 
       - name: Create Android project
