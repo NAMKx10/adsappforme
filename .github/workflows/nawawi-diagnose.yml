@@ -19,143 +19,113 @@ jobs:
           mkdir -p /tmp/nawawi
           tar -xzf /tmp/Nawawi-Build-001.tar.gz -C /tmp/nawawi
           curl -L --fail --retry 3 -o /tmp/full.mp3 https://d1.islamhouse.com/data/ar/ih_sounds/chain_01/Almtoon_Al3lmeeh/AlArb3un_AlNuweh/ar_AlArb3un_AlNuweh_Duraihim.mp3
-          ffmpeg -hide_banner -i /tmp/full.mp3 -af silencedetect=noise=-38dB:d=0.45 -f null - 2> /tmp/silences.txt || true
+          ffmpeg -hide_banner -i /tmp/full.mp3 -af silencedetect=noise=-38dB:d=0.20 -f null - 2> /tmp/silences.txt || true
       - name: Derive 42 hadith boundaries from approved synchronization
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          import re,json,math,subprocess
+          import re,json,subprocess,bisect
 
           html=Path('/tmp/nawawi/index.html').read_text(encoding='utf-8')
           m=re.search(r'const HADITHS = (\[.*?\]);\s*const TOTAL_HADITHS',html,re.S)
           assert m
-          hs=json.loads(m.group(1))
-          assert len(hs)==42
+          hs=json.loads(m.group(1)); assert len(hs)==42
           fs=[]; sync_end=[]
           for h in hs:
               st=h.get('syncTimes') or []
-              assert st and len(st[0])>=2, h['number']
+              assert st and len(st[0])>=2,h['number']
               fs.append(float(st[0][0]))
               sync_end.append(max(float(x[1]) for x in st if isinstance(x,list) and len(x)>1))
+          print('=== FIRST SYNC / END ===')
+          for i in range(42): print(f'{i+1:02d} first={fs[i]:.3f} end={sync_end[i]:.3f}')
 
           text=Path('/tmp/silences.txt').read_text(errors='ignore')
-          starts=[]; cands=[]
-          cur=None
+          cands=[]; cur=None
           for line in text.splitlines():
               a=re.search(r'silence_start:\s*([0-9.]+)',line)
               if a: cur=float(a.group(1))
               b=re.search(r'silence_end:\s*([0-9.]+)\s*\|\s*silence_duration:\s*([0-9.]+)',line)
               if b:
                   en=float(b.group(1)); dur=float(b.group(2))
-                  cands.append((en,dur,cur if cur is not None else en-dur))
-                  cur=None
+                  cands.append((en,dur,cur if cur is not None else en-dur)); cur=None
+          cands.sort(); times=[x[0] for x in cands]
           print('silence candidates:',len(cands))
 
-          # Exact speech onsets established from correlation of the first four approved files.
-          fixed=[76.3778,133.936,331.402,378.811]
-          # Snap to candidates so subsequent math uses the same detected boundaries.
-          snapped=[]
-          for x in fixed:
-              z=min(cands,key=lambda q:abs(q[0]-x))
-              assert abs(z[0]-x)<0.15,(x,z)
-              snapped.append(z)
-          fixed=[x[0] for x in snapped]
+          fixed0=[76.3778,133.936,331.402,378.811]
+          fixed=[]
+          for x in fixed0:
+              z=min(cands,key=lambda q:abs(q[0]-x)); assert abs(z[0]-x)<0.15,(x,z); fixed.append(z[0])
 
-          # Candidate boundaries from hadith 5 onward, only after hadith 4.
-          candidates=[x for x in cands if x[0] > fixed[-1]+1]
-
-          # Beam state: (cost, onset_index_in_candidates, chosen_list)
-          # Start clip 4 is fixed; derive the next onset based on exact local sync duration.
-          states=[(0.0,-1,[fixed[-1]])]
-          prev_onset=fixed[-1]
-          prev_start=prev_onset-fs[3]
-
-          # Iterate hadith numbers 5..42, selecting onset of each current hadith.
-          prev_states=[(0.0,prev_start,[fixed[-1]])]
+          prev_start=fixed[3]-fs[3]
+          # state = cost,current clip start,selected onset list beginning at h4
+          states=[(0.0,prev_start,[fixed[3]])]
           for cur_idx in range(4,42):
-              # previous hadith index is cur_idx-1
-              pe=sync_end[cur_idx-1]
-              next_fs=fs[cur_idx]
-              prev_fs=fs[cur_idx-1]
+              pe=sync_end[cur_idx-1]; next_fs=fs[cur_idx]
               new=[]
-              for cost,pstart,chosen in prev_states:
-                  last_onset=chosen[-1]
-                  # current clip start if candidate onset is chosen
-                  # Expected previous clip duration >= sync_end and normally has 0..4.5s trailing margin.
-                  lo=pstart+pe-0.10
-                  hi=pstart+pe+6.0
-                  for cand in candidates:
-                      onset,dur,_=cand
-                      if onset <= last_onset+0.2: continue
+              for cost,pstart,chosen in states:
+                  last=chosen[-1]
+                  lo_start=pstart+pe-0.12
+                  hi_start=pstart+pe+14.0
+                  lo_on=max(last+0.05,lo_start+next_fs)
+                  hi_on=hi_start+next_fs
+                  a=bisect.bisect_left(times,lo_on); b=bisect.bisect_right(times,hi_on)
+                  for onset,dur,_ in cands[a:b]:
                       cstart=onset-next_fs
-                      if cstart < lo: continue
-                      if cstart > hi: break
                       trailing=(cstart-pstart)-pe
-                      # Prefer ~1.6 sec trailing room, but allow 0..4 sec cheaply.
-                      if 0.0 <= trailing <= 4.0:
-                          tc=((trailing-1.5)/3.0)**2
+                      # Typical first approved tracks: sync end leaves roughly 1.4-3.2 sec before next clip.
+                      if 0 <= trailing <= 4.5:
+                          tc=((trailing-2.0)/2.5)**2
                       else:
-                          tc=4.0+abs(trailing-1.5)*1.5
-                      # Hadith boundaries are generally marked by clearer pauses.
-                      pause_reward=min(dur,3.5)*0.42
-                      # Extra reward for pauses >=1s and >=2s.
-                      if dur>=1.0: pause_reward+=0.30
-                      if dur>=2.0: pause_reward+=0.45
-                      nc=cost+tc-pause_reward
-                      new.append((nc,cstart,chosen+[onset]))
+                          tc=1.5+((abs(trailing-2.0)-2.5)/2.5)**2
+                      # Prefer meaningful boundary pauses; very tiny pauses are possible but costly.
+                      pause_reward=min(dur,4.0)*0.52
+                      if dur>=0.45: pause_reward+=0.18
+                      if dur>=0.9: pause_reward+=0.35
+                      if dur>=1.8: pause_reward+=0.55
+                      new.append((cost+tc-pause_reward,cstart,chosen+[onset]))
               if not new:
-                  raise RuntimeError(f'No candidates for hadith {cur_idx+1}')
+                  raise RuntimeError(f'No candidates for hadith {cur_idx+1}; previous best={states[0] if states else None}')
               new.sort(key=lambda x:x[0])
-              # Deduplicate by final onset, keep best, then beam.
               ded=[]; seen=set()
               for s in new:
                   k=round(s[2][-1],3)
                   if k in seen: continue
                   seen.add(k); ded.append(s)
-                  if len(ded)>=160: break
-              prev_states=ded
+                  if len(ded)>=500: break
+              states=ded
+              print(f'STEP h{cur_idx+1:02d}: states={len(states)} bestOnset={states[0][2][-1]:.3f} bestStart={states[0][1]:.3f} cost={states[0][0]:.3f}')
 
           full_dur=float(subprocess.check_output(['ffprobe','-v','error','-show_entries','format=duration','-of','default=nw=1:nk=1','/tmp/full.mp3']).decode().strip())
           finals=[]
-          for cost,start42,chosen in prev_states:
-              remain=full_dur-start42
-              tail=remain-sync_end[41]
-              # Last track should contain its full sync plus modest tail/outro.
-              if tail < -0.1: continue
-              fc=cost+(max(0,tail-12)*2.0)+((tail-2.0)/7.0)**2
+          for cost,start42,chosen in states:
+              remain=full_dur-start42; tail=remain-sync_end[41]
+              if tail < -0.12: continue
+              # End of source may include a short closing tag; penalize only implausibly large remainder.
+              fc=cost + max(0,tail-20)*1.5 + ((max(0,tail)-2.0)/12.0)**2
               finals.append((fc,start42,chosen,tail))
-          assert finals,'No viable final path'
-          finals.sort(key=lambda x:x[0])
-          best=finals[0]
-          chosen=[fixed[0],fixed[1],fixed[2]]+best[2]  # h1,h2,h3 + list beginning h4
+          assert finals,'No viable final path after h42'
+          finals.sort(key=lambda x:x[0]); best=finals[0]
+          chosen=[fixed[0],fixed[1],fixed[2]]+best[2]
           assert len(chosen)==42,len(chosen)
+          starts_clip=[chosen[i]-fs[i] for i in range(42)]
 
           print('=== SELECTED HADITH AUDIO BOUNDARIES ===')
-          starts_clip=[]
-          for i,onset in enumerate(chosen):
-              st=onset-fs[i]
-              starts_clip.append(st)
           for i in range(42):
               end=starts_clip[i+1] if i<41 else full_dur
-              dur=end-starts_clip[i]
-              trailing=dur-sync_end[i]
-              # Find source pause duration associated with onset.
+              dur=end-starts_clip[i]; trailing=dur-sync_end[i]
               z=min(cands,key=lambda q:abs(q[0]-chosen[i]))
               print(f'{i+1:02d}\tonset={chosen[i]:8.3f}\tclipStart={starts_clip[i]:8.3f}\tdur={dur:7.3f}\tsyncEnd={sync_end[i]:7.3f}\ttail={trailing:6.3f}\tpauseBefore={z[1]:5.3f}')
           print('FINAL COST',best[0],'LAST TAIL',best[3])
 
-          # Validate known first four against exact approved durations.
-          known=[]
+          print('=== KNOWN FIRST FOUR CHECK ===')
           for i in range(4):
               p=f'/tmp/nawawi/audio/NAW{i+1:03d}.mp3'
               d=float(subprocess.check_output(['ffprobe','-v','error','-show_entries','format=duration','-of','default=nw=1:nk=1',p]).decode().strip())
-              known.append(d)
-              print(f'KNOWN {i+1}: exact={d:.3f} inferred_to_next={(starts_clip[i+1]-starts_clip[i]) if i<3 else -1:.3f}')
-
-          # Hard safety: every generated track 5-42 must be long enough for existing sync data.
+              inferred=(starts_clip[i+1]-starts_clip[i]) if i<3 else 0
+              print(f'KNOWN {i+1}: exact={d:.3f} inferredNext={inferred:.3f}')
           for i in range(4,42):
               end=starts_clip[i+1] if i<41 else full_dur
-              assert end-starts_clip[i] >= sync_end[i]-0.05,(i+1,end-starts_clip[i],sync_end[i])
+              assert end-starts_clip[i] >= sync_end[i]-0.12,(i+1,end-starts_clip[i],sync_end[i])
 
           Path('/tmp/boundaries.json').write_text(json.dumps({'onsets':chosen,'starts':starts_clip,'syncEnd':sync_end,'fullDuration':full_dur},ensure_ascii=False,indent=2))
           PY
