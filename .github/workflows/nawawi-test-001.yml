@@ -1,0 +1,123 @@
+name: Build Nawawi Test 001
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: nawawi-test-001
+
+    steps:
+      - name: Checkout test branch
+        uses: actions/checkout@v4
+        with:
+          ref: nawawi-test-001
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Set up Python image support
+        run: python3 -m pip install --quiet pillow
+
+      - name: Verify protected HTML source
+        run: |
+          test -f app/src/main/assets/index.html
+          EXPECTED=$(head -n1 SOURCE-SHA256.txt | awk '{print $1}')
+          ACTUAL=$(sha256sum app/src/main/assets/index.html | awk '{print $1}')
+          echo "Expected: $EXPECTED"
+          echo "Actual:   $ACTUAL"
+          test "$EXPECTED" = "$ACTUAL"
+
+      - name: Verify 42 hadiths and protected structure
+        run: |
+          python3 - <<'PY'
+          import re,json,pathlib
+          text=pathlib.Path('app/src/main/assets/index.html').read_text(encoding='utf-8')
+          m=re.search(r'const HADITHS = (\[.*?\]);\s*const TOTAL_HADITHS',text,re.S)
+          assert m, 'HADITHS data not found'
+          data=json.loads(m.group(1))
+          assert len(data)==42, len(data)
+          assert [h['number'] for h in data]==list(range(1,43))
+          assert '<body/>' not in text
+          print('42 hadiths verified')
+          PY
+
+      - name: Generate Adaptive and Legacy icons from embedded app logo
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from PIL import Image
+          from io import BytesIO
+          import re,base64
+          text=Path('app/src/main/assets/index.html').read_text(encoding='utf-8')
+          m=re.search(r'<img class="entry-logo" src="data:image/[^;]+;base64,([^"]+)"',text)
+          if not m:
+              m=re.search(r'<img class="landing-logo" src="data:image/[^;]+;base64,([^"]+)"',text)
+          assert m, 'Embedded app logo not found'
+          img=Image.open(BytesIO(base64.b64decode(m.group(1)))).convert('RGBA')
+          bbox=img.getchannel('A').getbbox()
+          if bbox: img=img.crop(bbox)
+          side=max(img.size)
+          canvas=Image.new('RGBA',(side,side),(0,0,0,0))
+          scale=min((side*.68)/img.width,(side*.68)/img.height)
+          resized=img.resize((max(1,int(img.width*scale)),max(1,int(img.height*scale))),Image.Resampling.LANCZOS)
+          canvas.alpha_composite(resized,((side-resized.width)//2,(side-resized.height)//2))
+          sizes={'mdpi':48,'hdpi':72,'xhdpi':96,'xxhdpi':144,'xxxhdpi':192}
+          for dpi,size in sizes.items():
+              d=Path(f'app/src/main/res/mipmap-{dpi}'); d.mkdir(parents=True,exist_ok=True)
+              icon=canvas.resize((size,size),Image.Resampling.LANCZOS)
+              icon.save(d/'ic_launcher.png'); icon.save(d/'ic_launcher_round.png')
+          d=Path('app/src/main/res/drawable'); d.mkdir(parents=True,exist_ok=True)
+          canvas.resize((432,432),Image.Resampling.LANCZOS).save(d/'ic_launcher_foreground.png')
+          print('Icons generated')
+          PY
+
+      - name: Verify manifest has no INTERNET permission
+        run: |
+          if grep -q "android.permission.INTERNET" app/src/main/AndroidManifest.xml; then
+            echo "INTERNET permission must not exist"
+            exit 1
+          fi
+
+      - name: Build debug APK
+        run: gradle :app:assembleDebug --no-daemon
+
+      - name: Inspect built APK
+        run: |
+          AAPT="$ANDROID_HOME/build-tools/35.0.0/aapt"
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          "$AAPT" dump badging "$APK" | head -n 12
+          if "$AAPT" dump permissions "$APK" | grep -q "android.permission.INTERNET"; then
+            echo "Built APK unexpectedly contains INTERNET permission"
+            exit 1
+          fi
+          cp "$APK" ../Nawawi-Test-001.apk
+          sha256sum ../Nawawi-Test-001.apk > ../Nawawi-Test-001.apk.sha256
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nawawi-Test-001
+          path: |
+            Nawawi-Test-001.apk
+            Nawawi-Test-001.apk.sha256
+          if-no-files-found: error
