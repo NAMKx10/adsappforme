@@ -119,24 +119,12 @@ jobs:
           curl -L --fail --retry 3 -o payload/fonts/amiri-regular.ttf 'https://raw.githubusercontent.com/google/fonts/main/ofl/amiri/Amiri-Regular.ttf'
           curl -L --fail --retry 3 -o payload/fonts/amiri-bold.ttf 'https://raw.githubusercontent.com/google/fonts/main/ofl/amiri/Amiri-Bold.ttf'
           for f in payload/fonts/*.ttf; do test -s "$f"; done
+          for ref in $(grep -oE 'fonts/[A-Za-z0-9._-]+\.ttf' payload/index.html | sort -u); do
+            if [ ! -f "payload/$ref" ]; then cp payload/fonts/naskh.ttf "payload/$ref"; fi
+          done
           python3 - <<'PY'
           from pathlib import Path
-          import re,shutil
-          p=Path('payload/index.html');t=p.read_text(encoding='utf-8')
-          refs=sorted(set(re.findall(r'fonts/[^"\'\s)]+\.ttf',t,re.I)))
-          fallbacks=[Path('payload/fonts/naskh.ttf'),Path('payload/fonts/kufi.ttf'),Path('payload/fonts/sans.ttf'),Path('payload/fonts/nastaliq.ttf'),Path('payload/fonts/amiri-regular.ttf'),Path('payload/fonts/amiri-bold.ttf')]
-          for i,ref in enumerate(refs):
-              dst=Path('payload')/ref
-              if not dst.exists():
-                  dst.parent.mkdir(parents=True,exist_ok=True)
-                  shutil.copyfile(fallbacks[i%len(fallbacks)],dst)
-          print('Resolved original offline font refs:',refs)
-          PY
-          python3 - <<'PY'
-          from pathlib import Path
-          p=Path('payload/index.html');t=p.read_text(encoding='utf-8');css='''\
-<style id="android-offline-fonts">@font-face{font-family:"JawamiNaskh";src:url("fonts/naskh.ttf")}@font-face{font-family:"JawamiKufi";src:url("fonts/kufi.ttf")}@font-face{font-family:"JawamiSans";src:url("fonts/sans.ttf")}@font-face{font-family:"JawamiNastaliq";src:url("fonts/nastaliq.ttf")}@font-face{font-family:"JawamiAmiri";src:url("fonts/amiri-regular.ttf");font-weight:400}@font-face{font-family:"JawamiAmiri";src:url("fonts/amiri-bold.ttf");font-weight:700}</style>\
-''';assert '</head>' in t;p.write_text(t.replace('</head>',css+'</head>',1),encoding='utf-8')
+          p=Path('payload/index.html');t=p.read_text(encoding='utf-8');css='''\n<style id="android-offline-fonts">@font-face{font-family:"JawamiNaskh";src:url("fonts/naskh.ttf")}@font-face{font-family:"JawamiKufi";src:url("fonts/kufi.ttf")}@font-face{font-family:"JawamiSans";src:url("fonts/sans.ttf")}@font-face{font-family:"JawamiNastaliq";src:url("fonts/nastaliq.ttf")}@font-face{font-family:"JawamiAmiri";src:url("fonts/amiri-regular.ttf");font-weight:400}@font-face{font-family:"JawamiAmiri";src:url("fonts/amiri-bold.ttf");font-weight:700}</style>\n''';assert '</head>' in t;p.write_text(t.replace('</head>',css+'</head>',1),encoding='utf-8')
           PY
 
       - name: Create Android project
