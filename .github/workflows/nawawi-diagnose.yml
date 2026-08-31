@@ -1,0 +1,32 @@
+name: Nawawi Diagnose
+
+on:
+  push:
+    branches: [nawawi-apk-direct2]
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download approved build bundle
+        run: |
+          curl -L --fail --retry 3 -o /tmp/Nawawi-Build-001.tar.gz \
+            https://raw.githubusercontent.com/Mirsad140/Mirsad001/main/Nawawi-Build-001.tar.gz
+          mkdir -p /tmp/nawawi
+          tar -xzf /tmp/Nawawi-Build-001.tar.gz -C /tmp/nawawi
+      - name: Inspect bundle
+        run: |
+          echo '=== FILES ==='
+          find /tmp/nawawi -type f -printf '%P\t%s bytes\n' | sort
+          echo '=== SHA256 ==='
+          find /tmp/nawawi/audio -type f -print0 2>/dev/null | sort -z | xargs -0 -r sha256sum
+          echo '=== AUDIO DURATIONS ==='
+          for f in /tmp/nawawi/audio/*; do
+            [ -f "$f" ] || continue
+            printf '%s\t' "$(basename "$f")"
+            ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$f" || true
+          done
+          echo '=== INDEX ==='
+          wc -c /tmp/nawawi/index.html || true
+          grep -o 'audio/[A-Za-z0-9_.-]*' /tmp/nawawi/index.html | sort -u || true
