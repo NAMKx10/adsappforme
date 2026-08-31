@@ -2,6 +2,10 @@ name: Build Nawawi Test 001
 
 on:
   workflow_dispatch:
+  push:
+    branches: [ nawawi-test-001 ]
+    paths:
+      - 'nawawi-test-001/app/src/main/assets/index.html'
 
 jobs:
   build:
