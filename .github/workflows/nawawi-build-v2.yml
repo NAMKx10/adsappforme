@@ -1,0 +1,319 @@
+name: Build Nawawi Test 001 V2
+
+on:
+  push:
+    branches: [nawawi-apk-direct2]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Build tools
+        run: |
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+          python3 -m pip install --quiet numpy pillow
+
+      - name: Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Fetch approved payload
+        run: |
+          curl -L --fail --retry 3 -o Nawawi-Build-001.tar.gz https://raw.githubusercontent.com/Mirsad140/Mirsad001/main/Nawawi-Build-001.tar.gz
+          ACTUAL=$(sha256sum Nawawi-Build-001.tar.gz | awk '{print $1}')
+          EXPECTED=6fb5084086c36ec7f3fef592b31d4d1fb89629a9b92eec48e9bc47f3a3dea39b
+          echo "payload sha256: $ACTUAL"
+          test "$ACTUAL" = "$EXPECTED"
+          mkdir payload
+          tar -xzf Nawawi-Build-001.tar.gz -C payload
+
+      - name: Lock protected content fields
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json,hashlib
+          t=Path('payload/index.html').read_text(encoding='utf-8')
+          m=re.search(r'const HADITHS\s*=\s*(\[.*?\])\s*;\s*const TOTAL_HADITHS',t,re.S)
+          assert m, 'HADITHS block missing'
+          data=json.loads(m.group(1))
+          assert len(data)==42 and [h['number'] for h in data]==list(range(1,43))
+          expected={
+            'number':'9b669fa350a15f13d4ab456869612801860848d589df68cb61930c16e5ef4a98',
+            'title':'165bdd0111e088d38540464f0312c5d1bafa3fdd62d8cf2eba70d81535f4f593',
+            'shortTitle':'9a5955c46b92a0819b5e2e6ec893742c2307095ee4c4ee8ed8b0bb74a53ef8e1',
+            'narratorName':'1d415e0e16ade4914586d17c3fefd3c830159eb9f22e7d019ba40c4379e23698',
+            'narratorSearch':'8c4e647c62396d23c17eb7691f216d18e8bc4e355a7c1f59c5707bfe38607fce',
+            'takhrij':'e7b13866a68dffffef0993195c3018f2a7cd686ad5472b6190db870319fe89fe',
+            'searchTakhrij':'1d20b5a6a55000a1a3c960223cbe156174de4a45beee54d49172c2b9ae4eec7a',
+            'segments':'3ccd9fd0eb9973724f97762bfc5056517eef0447ab65f2b4af0c07b2d0acbacd',
+            'plainMatn':'410edf5254ea9061975e02f1377d3f1b672b282528afa4984540b0335fd0a582',
+            'words':'977a88e8926cf7b6646d2e9bdb9c89b3d1205b1836781da9bfca11808a86b834',
+            'explanation':'ea8b42fb7ad0327f6bf99d12ce0eb8a4c875918524cf968e15ea284fbb0e6785',
+            'benefits':'dea5c7fcb430e2488d9362ed9acd89063fe6a3009bf960c514b6ec77b300b361',
+            'practice':'d58063309a5f64819fa01a96ee8bfe6e61dcd6c9d6e6f0e274ed1a97bee25882',
+            'quiz':'a98527804f0f1543b61dd74df4544ed70650a125740f46a5d1b4b1385b4d062f',
+            'syncTimes':'fa258fe612f44825174e159b5911bf2de5da22121e9c15e5dfdd0e7982bfd6d9',
+            'sentenceUnits':'d5e5bf9580eb2cdb92ce832e580b4d4f175e50d6428733b49ba90ee18a25762c',
+            'syncMap':'aa5e3c697fe39ae1f2df71312e2a252fa23aa4ca858d76c7ee8cfa56cd871399',
+            'syncGroups':'c4227d7e5d41dff17c7fb8d30e914f9ae8eb663cfaf82202c891fca8377bc357',
+            'syncMethod':'768f38cbbda249d33b8e06d479f62c5e3118c0b0de075c468d86290ca8f91f02',
+            'audioDuration':'c56483e59873017026bc6a8f92c730512957327a67efc1d8e9d0a79e8c5937e9',
+            'silenceCount':'7206bc4d503a6d7d9a6e0f834680d37e39a50baf142443ab4a0d3b8c381ecae7'
+          }
+          for field,want in expected.items():
+              vals=[h.get(field) for h in data]
+              blob=json.dumps(vals,ensure_ascii=False,separators=(',',':'))
+              got=hashlib.sha256(blob.encode()).hexdigest()
+              assert got==want,(field,got,want)
+          assert [h['audio'] for h in data]==[f'audio/NAW{i:03d}.mp3' for i in range(1,43)]
+          assert not re.search(r'https?://',t)
+          print('42 hadith records and all protected content/sync fields are locked')
+          PY
+
+      - name: Fetch full Hamad Al-Duraihim audio
+        run: |
+          curl -L --fail --retry 3 -o full.mp3 https://d1.islamhouse.com/data/ar/ih_sounds/chain_01/Almtoon_Al3lmeeh/AlArb3un_AlNuweh/ar_AlArb3un_AlNuweh_Duraihim.mp3
+          test "$(stat -c%s full.mp3)" = "25291745"
+          ffprobe -v error -show_entries format=duration -of default=nw=1 full.mp3
+
+      - name: Verify full source against approved audio 1-4
+        run: |
+          python3 - <<'PY'
+          import csv,subprocess,numpy as np
+          rows=list(csv.DictReader(open('payload/segments.csv',encoding='utf-8-sig')))
+          assert len(rows)==42
+          def decode(args):
+              p=subprocess.run(args,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=True)
+              return np.frombuffer(p.stdout,dtype='<f4')
+          def envelope(x):
+              frame=400
+              n=(len(x)//frame)*frame
+              x=x[:n].reshape(-1,frame)
+              e=np.sqrt(np.mean(x*x,axis=1)+1e-12)
+              e=np.log1p(e*30)
+              return (e-e.mean())/(e.std()+1e-9)
+          def corr_shift(a,b,maxs=100):
+              best=-2
+              for s in range(-maxs,maxs+1):
+                  aa=a[max(0,s):len(a)+min(0,s)]
+                  bb=b[max(0,-s):len(b)+min(0,-s)]
+                  n=min(len(aa),len(bb))
+                  if n<100: continue
+                  aa=aa[:n];bb=bb[:n]
+                  c=float(np.dot(aa,bb)/(np.linalg.norm(aa)*np.linalg.norm(bb)+1e-9))
+                  best=max(best,c)
+              return best
+          for i,row in enumerate(rows[:4],1):
+              start=float(row['start_seconds']);dur=float(row['duration_seconds'])
+              approved=envelope(decode(['ffmpeg','-v','error','-i',f"payload/audio/{row['file']}",'-ac','1','-ar','8000','-f','f32le','-']))
+              source=envelope(decode(['ffmpeg','-v','error','-ss',str(max(0,start-5)),'-i','full.mp3','-t',str(dur+10),'-ac','1','-ar','8000','-f','f32le','-']))
+              c=corr_shift(approved,source,140)
+              print(f'hadith {i}: correlation {c:.4f}')
+              assert c>0.65,(i,c)
+          print('Full recording identity confirmed against approved first four files')
+          PY
+
+      - name: Generate local audio 5-42
+        run: |
+          python3 - <<'PY'
+          import csv,subprocess,pathlib
+          rows=list(csv.DictReader(open('payload/segments.csv',encoding='utf-8-sig')))
+          out=pathlib.Path('payload/audio');out.mkdir(exist_ok=True)
+          for row in rows[4:]:
+              dest=out/row['file'];start=float(row['start_seconds']);dur=float(row['duration_seconds'])
+              subprocess.run(['ffmpeg','-y','-v','error','-ss',f'{start:.3f}','-i','full.mp3','-t',f'{dur:.3f}','-vn','-ac','1','-ar','44100','-codec:a','libmp3lame','-b:a','64k','-map_metadata','-1',str(dest)],check=True)
+          files=sorted(out.glob('NAW*.mp3'))
+          assert len(files)==42,len(files)
+          print('local audio files:',len(files))
+          PY
+
+      - name: Validate audio files
+        run: |
+          python3 - <<'PY'
+          import csv,subprocess,json,pathlib
+          rows=list(csv.DictReader(open('payload/segments.csv',encoding='utf-8-sig')))
+          for row in rows:
+              p=pathlib.Path('payload/audio')/row['file'];assert p.exists() and p.stat().st_size>1000
+              r=subprocess.run(['ffprobe','-v','error','-show_entries','format=duration','-of','json',str(p)],capture_output=True,text=True,check=True)
+              actual=float(json.loads(r.stdout)['format']['duration']); expected=float(row['duration_seconds'])
+              assert abs(actual-expected)<0.85,(row['file'],actual,expected)
+          print('all 42 audio durations valid')
+          PY
+
+      - name: Fetch offline reading fonts
+        run: |
+          mkdir -p payload/fonts
+          curl -L --fail --retry 3 -o payload/fonts/naskh.ttf 'https://raw.githubusercontent.com/google/fonts/main/ofl/notonaskharabic/NotoNaskhArabic%5Bwght%5D.ttf'
+          curl -L --fail --retry 3 -o payload/fonts/kufi.ttf 'https://raw.githubusercontent.com/google/fonts/main/ofl/notokufiarabic/NotoKufiArabic%5Bwght%5D.ttf'
+          curl -L --fail --retry 3 -o payload/fonts/sans.ttf 'https://raw.githubusercontent.com/google/fonts/main/ofl/notosansarabic/NotoSansArabic%5Bwdth%2Cwght%5D.ttf'
+          curl -L --fail --retry 3 -o payload/fonts/nastaliq.ttf 'https://raw.githubusercontent.com/google/fonts/main/ofl/notonastaliqurdu/NotoNastaliqUrdu%5Bwght%5D.ttf'
+          curl -L --fail --retry 3 -o payload/fonts/amiri-regular.ttf 'https://raw.githubusercontent.com/google/fonts/main/ofl/amiri/Amiri-Regular.ttf'
+          curl -L --fail --retry 3 -o payload/fonts/amiri-bold.ttf 'https://raw.githubusercontent.com/google/fonts/main/ofl/amiri/Amiri-Bold.ttf'
+          for f in payload/fonts/*.ttf; do test -s "$f"; done
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('payload/index.html');t=p.read_text(encoding='utf-8')
+          css='''\n<style id="android-offline-fonts">\n@font-face{font-family:"JawamiNaskh";src:url("fonts/naskh.ttf") format("truetype");font-weight:100 900;font-style:normal;font-display:swap}\n@font-face{font-family:"JawamiKufi";src:url("fonts/kufi.ttf") format("truetype");font-weight:100 900;font-style:normal;font-display:swap}\n@font-face{font-family:"JawamiSans";src:url("fonts/sans.ttf") format("truetype");font-weight:100 900;font-style:normal;font-display:swap}\n@font-face{font-family:"JawamiNastaliq";src:url("fonts/nastaliq.ttf") format("truetype");font-weight:100 900;font-style:normal;font-display:swap}\n@font-face{font-family:"JawamiAmiri";src:url("fonts/amiri-regular.ttf") format("truetype");font-weight:400;font-style:normal;font-display:swap}\n@font-face{font-family:"JawamiAmiri";src:url("fonts/amiri-bold.ttf") format("truetype");font-weight:700;font-style:normal;font-display:swap}\n</style>\n'''
+          assert '</head>' in t;t=t.replace('</head>',css+'</head>',1);p.write_text(t,encoding='utf-8')
+          PY
+
+      - name: Create Android project
+        run: |
+          mkdir -p android/app/src/main/java/com/adnani/nawawi42 android/app/src/main/res/layout android/app/src/main/res/values android/app/src/main/res/values-v21 android/app/src/main/res/mipmap-anydpi-v26 android/app/src/main/res/drawable android/app/src/main/assets
+          cp payload/index.html android/app/src/main/assets/index.html
+          cp -r payload/audio android/app/src/main/assets/audio
+          cp -r payload/images android/app/src/main/assets/images
+          cp -r payload/fonts android/app/src/main/assets/fonts
+          cat > android/settings.gradle <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }
+          rootProject.name='NawawiTest001'
+          include ':app'
+          EOF
+          cat > android/build.gradle <<'EOF'
+          plugins { id 'com.android.application' version '8.7.3' apply false }
+          EOF
+          cat > android/gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8
+          android.useAndroidX=false
+          android.nonTransitiveRClass=true
+          EOF
+          cat > android/app/build.gradle <<'EOF'
+          plugins { id 'com.android.application' }
+          android {
+            namespace 'com.adnani.nawawi42'
+            compileSdk 35
+            defaultConfig { applicationId 'com.adnani.nawawi42'; minSdk 19; targetSdk 35; versionCode 1; versionName '0.1.0-test001' }
+            buildTypes { debug { debuggable true; minifyEnabled false } }
+            compileOptions { sourceCompatibility JavaVersion.VERSION_1_8; targetCompatibility JavaVersion.VERSION_1_8 }
+          }
+          EOF
+          cat > android/app/src/main/res/layout/activity_main.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?><WebView xmlns:android="http://schemas.android.com/apk/res/android" android:id="@+id/webView" android:layout_width="match_parent" android:layout_height="match_parent" android:background="#FFFDF8"/>
+          EOF
+          cat > android/app/src/main/res/values/colors.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?><resources><color name="launcher_bg">#0F5A43</color></resources>
+          EOF
+          cat > android/app/src/main/res/values/styles.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?><resources><style name="AppTheme" parent="android:style/Theme.Holo.Light.NoActionBar"><item name="android:windowNoTitle">true</item></style></resources>
+          EOF
+          cat > android/app/src/main/res/values-v21/styles.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?><resources><style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar"><item name="android:windowNoTitle">true</item><item name="android:colorAccent">#C99A3B</item><item name="android:navigationBarColor">#0F5A43</item><item name="android:statusBarColor">#0F5A43</item></style></resources>
+          EOF
+          cat > android/app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <application android:allowBackup="true" android:hardwareAccelerated="true" android:largeHeap="true" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher_round" android:label="الأربعون النووية" android:supportsRtl="true" android:theme="@style/AppTheme">
+              <activity android:name=".MainActivity" android:configChanges="orientation|screenSize|keyboardHidden" android:exported="true"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity>
+              <provider android:name=".ShareFileProvider" android:authorities="com.adnani.nawawi42.share" android:exported="false" android:grantUriPermissions="true"/>
+            </application>
+          </manifest>
+          EOF
+
+      - name: Android native bridge
+        run: |
+          cat > android/app/src/main/java/com/adnani/nawawi42/MainActivity.java <<'EOF'
+          package com.adnani.nawawi42;
+          import android.app.Activity;import android.content.*;import android.net.Uri;import android.os.*;import android.webkit.*;import android.widget.Toast;import java.io.*;
+          public class MainActivity extends Activity{
+            static final int OPEN=1001,SAVE=1002;WebView w;ValueCallback<Uri[]> modern;ValueCallback<Uri> legacy;String pending=null,mime="application/json";
+            public void onCreate(Bundle b){super.onCreate(b);setContentView(R.layout.activity_main);w=findViewById(R.id.webView);WebSettings s=w.getSettings();s.setJavaScriptEnabled(true);s.setDomStorageEnabled(true);s.setDatabaseEnabled(true);s.setAllowFileAccess(true);s.setAllowContentAccess(true);s.setDefaultTextEncodingName("utf-8");if(Build.VERSION.SDK_INT>=16){s.setAllowFileAccessFromFileURLs(true);s.setAllowUniversalAccessFromFileURLs(false);}if(Build.VERSION.SDK_INT>=17)s.setMediaPlaybackRequiresUserGesture(false);w.addJavascriptInterface(new Share(),"AndroidShare");w.addJavascriptInterface(new Files(),"AndroidFiles");w.addJavascriptInterface(new Clip(),"AndroidClipboard");w.setWebViewClient(new WebViewClient(){public void onPageFinished(WebView v,String u){super.onPageFinished(v,u);inject();}});if(Build.VERSION.SDK_INT>=21)w.setWebChromeClient(new ModernChromeClient(this));else w.setWebChromeClient(new LegacyChromeClient(this));if(b==null)w.loadUrl("file:///android_asset/index.html");else w.restoreState(b);}
+            void inject(){String j="(function(){if(window.__native)return;window.__native=1;var sh=function(d){d=d||{};return new Promise(function(ok,no){try{var f=(d.files||[])[0];if(f){var r=new FileReader();r.onload=function(){AndroidShare.image(d.title||'',d.text||'',f.name||'card.png',r.result);ok()};r.onerror=no;r.readAsDataURL(f)}else{AndroidShare.text(d.title||'',d.text||'');ok()}}catch(e){no(e)}})};try{Object.defineProperty(navigator,'share',{configurable:true,value:sh});Object.defineProperty(navigator,'canShare',{configurable:true,value:function(){return true}});Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:function(t){AndroidClipboard.copy(String(t||''));return Promise.resolve()}}})}catch(e){}var oc=HTMLAnchorElement.prototype.click;HTMLAnchorElement.prototype.click=function(){var a=this;if(a.download&&a.href&&a.href.indexOf('blob:')===0){fetch(a.href).then(function(r){return r.text()}).then(function(t){AndroidFiles.save(a.download||'nawawi-backup.json',t,'application/json')});return}return oc.call(a)}})();";w.evaluateJavascript(j,null);}
+            void open(){Intent i=new Intent(Intent.ACTION_OPEN_DOCUMENT);i.addCategory(Intent.CATEGORY_OPENABLE);i.setType("application/json");startActivityForResult(i,OPEN);}void save(String n,String t,String m){pending=t;mime=m;Intent i=new Intent(Intent.ACTION_CREATE_DOCUMENT);i.addCategory(Intent.CATEGORY_OPENABLE);i.setType(m);i.putExtra(Intent.EXTRA_TITLE,n);startActivityForResult(i,SAVE);}
+            protected void onActivityResult(int r,int c,Intent d){super.onActivityResult(r,c,d);Uri u=(c==RESULT_OK&&d!=null)?d.getData():null;if(r==OPEN){if(modern!=null){modern.onReceiveValue(u==null?null:new Uri[]{u});modern=null;}if(legacy!=null){legacy.onReceiveValue(u);legacy=null;}}else if(r==SAVE){if(u!=null&&pending!=null)try(OutputStream o=getContentResolver().openOutputStream(u)){o.write(pending.getBytes("UTF-8"));Toast.makeText(this,"تم الحفظ",Toast.LENGTH_SHORT).show();}catch(Exception e){}pending=null;}}
+            protected void onSaveInstanceState(Bundle b){w.saveState(b);super.onSaveInstanceState(b);}public void onBackPressed(){if(w.canGoBack()){w.goBack();return;}w.evaluateJavascript("(function(){try{if(typeof currentPage!=='undefined'&&currentPage&&currentPage!=='home'&&typeof showPage==='function'){showPage('home');return '1'}return '0'}catch(e){return '0'}})()",v->{if(v==null||!v.contains("1"))MainActivity.super.onBackPressed();});}
+            public class Clip{@JavascriptInterface public void copy(String t){((android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("حديث",t));}}
+            public class Files{@JavascriptInterface public void save(String n,String t,String m){runOnUiThread(()->MainActivity.this.save(n,t,m));}}
+            public class Share{@JavascriptInterface public void text(String a,String b){runOnUiThread(()->{Intent i=new Intent(Intent.ACTION_SEND);i.setType("text/plain");i.putExtra(Intent.EXTRA_SUBJECT,a);i.putExtra(Intent.EXTRA_TEXT,b);startActivity(Intent.createChooser(i,"مشاركة الحديث"));});}@JavascriptInterface public void image(String a,String b,String n,String d){try{int c=d.indexOf(',');byte[] x=android.util.Base64.decode(d.substring(c+1),android.util.Base64.DEFAULT);File dir=new File(getCacheDir(),"share");dir.mkdirs();String safe=n.replaceAll("[^A-Za-z0-9._-]","_");File f=new File(dir,safe);try(FileOutputStream o=new FileOutputStream(f)){o.write(x);}Uri u=Uri.parse("content://com.adnani.nawawi42.share/"+Uri.encode(safe));runOnUiThread(()->{Intent i=new Intent(Intent.ACTION_SEND);i.setType("image/png");i.putExtra(Intent.EXTRA_TEXT,b);i.putExtra(Intent.EXTRA_STREAM,u);i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);startActivity(Intent.createChooser(i,"مشاركة بطاقة الحديث"));});}catch(Exception e){text(a,b);}}}
+          }
+          EOF
+          cat > android/app/src/main/java/com/adnani/nawawi42/ModernChromeClient.java <<'EOF'
+          package com.adnani.nawawi42;import android.annotation.TargetApi;import android.net.Uri;import android.webkit.*;@TargetApi(21) public class ModernChromeClient extends WebChromeClient{final MainActivity a;ModernChromeClient(MainActivity x){a=x;}public boolean onShowFileChooser(WebView v,ValueCallback<Uri[]> c,FileChooserParams p){a.modern=c;a.open();return true;}}
+          EOF
+          cat > android/app/src/main/java/com/adnani/nawawi42/LegacyChromeClient.java <<'EOF'
+          package com.adnani.nawawi42;import android.net.Uri;import android.webkit.*;public class LegacyChromeClient extends WebChromeClient{final MainActivity a;LegacyChromeClient(MainActivity x){a=x;}public void openFileChooser(ValueCallback<Uri> c){a.legacy=c;a.open();}public void openFileChooser(ValueCallback<Uri> c,String t){a.legacy=c;a.open();}public void openFileChooser(ValueCallback<Uri> c,String t,String cap){a.legacy=c;a.open();}}
+          EOF
+          cat > android/app/src/main/java/com/adnani/nawawi42/ShareFileProvider.java <<'EOF'
+          package com.adnani.nawawi42;import android.content.*;import android.database.*;import android.database.MatrixCursor;import android.net.Uri;import android.os.ParcelFileDescriptor;import android.provider.OpenableColumns;import java.io.*;public class ShareFileProvider extends ContentProvider{public boolean onCreate(){return true;}File f(Uri u)throws FileNotFoundException{String n=Uri.decode(u.getLastPathSegment()).replace("/","_").replace("\\","_");File x=new File(new File(getContext().getCacheDir(),"share"),n);if(!x.exists())throw new FileNotFoundException();return x;}public String getType(Uri u){return "image/png";}public ParcelFileDescriptor openFile(Uri u,String m)throws FileNotFoundException{return ParcelFileDescriptor.open(f(u),ParcelFileDescriptor.MODE_READ_ONLY);}public Cursor query(Uri u,String[]p,String s,String[]a,String o){try{File x=f(u);MatrixCursor c=new MatrixCursor(new String[]{OpenableColumns.DISPLAY_NAME,OpenableColumns.SIZE});c.addRow(new Object[]{x.getName(),x.length()});return c;}catch(Exception e){return null;}}public Uri insert(Uri u,ContentValues v){throw new UnsupportedOperationException();}public int delete(Uri u,String s,String[]a){return 0;}public int update(Uri u,ContentValues v,String s,String[]a){return 0;}}
+          EOF
+
+      - name: Generate launcher icons
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from PIL import Image
+          import re
+          t=Path('payload/index.html').read_text(encoding='utf-8')
+          refs=re.findall(r'images/[^"\']+\.(?:png|webp|jpg|jpeg)',t,re.I)
+          src=Path('payload')/(refs[0] if refs else 'images/img01.webp')
+          im=Image.open(src).convert('RGBA');side=max(im.size);base=Image.new('RGBA',(side,side),(15,90,67,255));scale=min(side*.68/im.width,side*.68/im.height);q=im.resize((int(im.width*scale),int(im.height*scale)),Image.Resampling.LANCZOS);base.alpha_composite(q,((side-q.width)//2,(side-q.height)//2))
+          for d,s in {'mdpi':48,'hdpi':72,'xhdpi':96,'xxhdpi':144,'xxxhdpi':192}.items():
+              p=Path('android/app/src/main/res/mipmap-'+d);p.mkdir(parents=True,exist_ok=True);x=base.resize((s,s),Image.Resampling.LANCZOS);x.save(p/'ic_launcher.png');x.save(p/'ic_launcher_round.png')
+          base.resize((432,432),Image.Resampling.LANCZOS).save('android/app/src/main/res/drawable/ic_launcher_foreground.png')
+          PY
+          cat > android/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?><adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android"><background android:drawable="@color/launcher_bg"/><foreground android:drawable="@drawable/ic_launcher_foreground"/></adaptive-icon>
+          EOF
+          cp android/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml android/app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
+
+      - name: Offline pre-build audit
+        run: |
+          ! grep -q "android.permission.INTERNET" android/app/src/main/AndroidManifest.xml
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json
+          r=Path('android/app/src/main/assets');t=(r/'index.html').read_text(encoding='utf-8');m=re.search(r'const HADITHS\s*=\s*(\[.*?\])\s*;\s*const TOTAL_HADITHS',t,re.S);assert len(json.loads(m.group(1)))==42
+          assert not re.search(r'https?://',t);assert len(list((r/'audio').glob('NAW*.mp3')))==42
+          for ref in set(re.findall(r'(?:audio|images|fonts)/[^"\'\s)]+',t)):
+              assert (r/ref).exists(),ref
+          print('offline asset audit passed')
+          PY
+
+      - name: Build APK
+        run: gradle -p android :app:assembleDebug --no-daemon
+
+      - name: Inspect APK
+        run: |
+          APK=android/app/build/outputs/apk/debug/app-debug.apk
+          test -f "$APK"
+          AAPT="$ANDROID_HOME/build-tools/35.0.0/aapt"
+          "$AAPT" dump badging "$APK" | tee apk-badging.txt
+          "$AAPT" dump permissions "$APK" | tee apk-permissions.txt
+          ! grep -q "android.permission.INTERNET" apk-permissions.txt
+          COUNT=$(unzip -l "$APK" | grep -E 'assets/audio/NAW[0-9]{3}\.mp3' | wc -l | tr -d ' ')
+          echo "audio files in APK: $COUNT"
+          test "$COUNT" = "42"
+          cp "$APK" Nawawi-Test-001.apk
+          sha256sum Nawawi-Test-001.apk | tee Nawawi-Test-001.apk.sha256
+          printf 'Protected hadith records: 42\nLocal audio files: 42\nInternet permission: NONE\nPackage: com.adnani.nawawi42\nminSdk: 19\n' > BUILD-REPORT.txt
+          ls -lh Nawawi-Test-001.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nawawi-Test-001
+          path: |
+            Nawawi-Test-001.apk
+            Nawawi-Test-001.apk.sha256
+            BUILD-REPORT.txt
+            apk-badging.txt
+            apk-permissions.txt
+          if-no-files-found: error
+          retention-days: 30
