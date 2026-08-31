@@ -1,0 +1,2 @@
+f11db6cac5146bca6ee9994f8ff2ef186c6cc8455164234a35010f3be8d91ed0  جوامع42-0023.html
+f11db6cac5146bca6ee9994f8ff2ef186c6cc8455164234a35010f3be8d91ed0  app/src/main/assets/index.html
