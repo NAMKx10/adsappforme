@@ -9,6 +9,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install audio tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
       - name: Download approved build bundle
         run: |
           curl -L --fail --retry 3 -o /tmp/Nawawi-Build-001.tar.gz \
@@ -17,16 +21,19 @@ jobs:
           tar -xzf /tmp/Nawawi-Build-001.tar.gz -C /tmp/nawawi
       - name: Inspect bundle
         run: |
-          echo '=== FILES ==='
-          find /tmp/nawawi -type f -printf '%P\t%s bytes\n' | sort
-          echo '=== SHA256 ==='
-          find /tmp/nawawi/audio -type f -print0 2>/dev/null | sort -z | xargs -0 -r sha256sum
-          echo '=== AUDIO DURATIONS ==='
+          echo '=== AUDIO SHA256 / DURATION / BITRATE / TAGS ==='
           for f in /tmp/nawawi/audio/*; do
             [ -f "$f" ] || continue
-            printf '%s\t' "$(basename "$f")"
-            ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$f" || true
+            echo "--- $(basename "$f") ---"
+            sha256sum "$f"
+            ffprobe -v error -show_entries format=duration,bit_rate:format_tags -of default=noprint_wrappers=1 "$f" || true
           done
-          echo '=== INDEX ==='
-          wc -c /tmp/nawawi/index.html || true
+          echo '=== MP3 HEADERS ==='
+          for f in /tmp/nawawi/audio/*; do
+            [ -f "$f" ] || continue
+            echo "--- $(basename "$f") ---"
+            file "$f" || true
+            strings -n 8 "$f" | head -n 20 || true
+          done
+          echo '=== INDEX AUDIO PATHS ==='
           grep -o 'audio/[A-Za-z0-9_.-]*' /tmp/nawawi/index.html | sort -u || true
