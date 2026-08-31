@@ -1,0 +1,82 @@
+name: Diagnose Nawawi protected hash
+
+on:
+  push:
+    branches: [nawawi-apk-direct2]
+  workflow_dispatch:
+
+jobs:
+  hash:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download payload
+        run: |
+          curl -L --fail --retry 3 -o payload.tar.gz https://raw.githubusercontent.com/Mirsad140/Mirsad001/main/Nawawi-Build-001.tar.gz
+          mkdir payload && tar -xzf payload.tar.gz -C payload
+      - name: Find exact protected-hash representation
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json,hashlib,itertools
+          t=Path('payload/index.html').read_text(encoding='utf-8')
+          b=Path('payload/index.html').read_bytes()
+          expected=Path('payload/HADITHS.sha256').read_text().strip().split()[0]
+          print('EXPECTED',expected)
+          def H(x):
+              if isinstance(x,str): x=x.encode('utf-8')
+              return hashlib.sha256(x).hexdigest()
+          found=[]
+          def chk(name,x):
+              h=H(x); print(name,h,len(x));
+              if h==expected: found.append(name)
+          # exact source spans
+          s=t.index('const HADITHS')
+          a=t.index('[',s)
+          e_total=t.index('const TOTAL_HADITHS',a)
+          # find semicolon immediately before TOTAL
+          pre=t[:e_total]
+          semi=pre.rfind(';')
+          spans={
+            'const_to_before_total': t[s:e_total],
+            'const_to_semicolon_inclusive': t[s:semi+1],
+            'array_to_semicolon_inclusive': t[a:semi+1],
+            'array_only_source': t[a:semi].rstrip(),
+            'before_total_rstrip': t[s:e_total].rstrip(),
+          }
+          m=re.search(r'const HADITHS\s*=\s*(\[.*?\])\s*;\s*const TOTAL_HADITHS',t,re.S)
+          assert m
+          arr=m.group(1); data=json.loads(arr)
+          spans['regex_array']=arr
+          spans['const_eq_array_semicolon']='const HADITHS = '+arr+';'
+          spans['const_eq_array_semicolon_space']='const HADITHS = '+arr+'; '
+          spans['const_eq_array']='const HADITHS = '+arr
+          for name,x in list(spans.items()):
+              chk(name,x)
+              chk(name+'_LFend',x+'\n')
+              chk(name+'_CRLF',x.replace('\n','\r\n'))
+              chk(name+'_CRLFend',x.replace('\n','\r\n')+'\r\n')
+              chk(name+'_BOM','\ufeff'+x)
+          # parsed JSON serializations
+          dumps={
+            'json_compact':json.dumps(data,ensure_ascii=False,separators=(',',':')),
+            'json_default':json.dumps(data,ensure_ascii=False),
+            'json_ascii_default':json.dumps(data),
+            'json_indent2':json.dumps(data,ensure_ascii=False,indent=2),
+            'json_indent4':json.dumps(data,ensure_ascii=False,indent=4),
+            'json_sorted_compact':json.dumps(data,ensure_ascii=False,separators=(',',':'),sort_keys=True),
+          }
+          for n,x in dumps.items():
+              chk(n,x); chk(n+'_LFend',x+'\n'); chk(n+'_CRLF',x.replace('\n','\r\n'))
+              chk('const_'+n,'const HADITHS = '+x+';')
+          # whole-line candidates around declaration
+          lines=t.splitlines(keepends=True)
+          idx=next(i for i,l in enumerate(lines) if 'const HADITHS' in l)
+          for before in range(0,3):
+              for after in range(0,5):
+                  lo=max(0,idx-before); hi=min(len(lines),idx+after+1)
+                  chk(f'lines_{lo}_{hi}',''.join(lines[lo:hi]))
+          print('MATCHES',found)
+          if not found:
+              print('NO_MATCH')
+          PY
