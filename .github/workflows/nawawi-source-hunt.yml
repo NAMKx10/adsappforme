@@ -1,0 +1,71 @@
+name: Nawawi Source Hunt
+
+on:
+  push:
+    branches: [nawawi-apk-direct2]
+
+jobs:
+  hunt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg unzip file curl
+      - name: Download approved first-four reference bundle
+        run: |
+          curl -L --fail --retry 3 -o /tmp/Nawawi-Build-001.tar.gz https://raw.githubusercontent.com/Mirsad140/Mirsad001/main/Nawawi-Build-001.tar.gz
+          mkdir -p /tmp/ref
+          tar -xzf /tmp/Nawawi-Build-001.tar.gz -C /tmp/ref
+      - name: Try APKPure package download endpoints
+        run: |
+          set +e
+          UA='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/151 Safari/537.36'
+          curl -A "$UA" -L --retry 3 --connect-timeout 20 -o /tmp/arboon_apk.bin 'https://d.apkpure.com/b/APK/com.iq_studio.arboon?version=latest'
+          echo 'APK endpoint:'; ls -lh /tmp/arboon_apk.bin; file /tmp/arboon_apk.bin
+          curl -A "$UA" -L --retry 3 --connect-timeout 20 -o /tmp/arboon_xapk.bin 'https://d.apkpure.com/b/XAPK/com.iq_studio.arboon?version=latest'
+          echo 'XAPK endpoint:'; ls -lh /tmp/arboon_xapk.bin; file /tmp/arboon_xapk.bin
+          set -e
+      - name: Extract every APK/XAPK candidate and locate audio
+        run: |
+          rm -rf /tmp/pkg; mkdir -p /tmp/pkg
+          for src in /tmp/arboon_apk.bin /tmp/arboon_xapk.bin; do
+            [ -s "$src" ] || continue
+            d="/tmp/pkg/$(basename "$src")"; mkdir -p "$d"
+            unzip -q -o "$src" -d "$d" 2>/dev/null || true
+            find "$d" -type f \( -iname '*.apk' -o -iname '*.xapk' \) -print0 | while IFS= read -r -d '' a; do
+              ad="$a.unpacked"; mkdir -p "$ad"; unzip -q -o "$a" -d "$ad" 2>/dev/null || true
+            done
+          done
+          echo '=== candidate archives/files ==='
+          find /tmp/pkg -type f | head -n 200
+          echo '=== audio-like files ==='
+          find /tmp/pkg -type f \( -iname '*.mp3' -o -iname '*.ogg' -o -iname '*.wav' -o -iname '*.m4a' -o -iname '*.aac' \) -printf '%p\t%s\n' | sort | head -n 300
+      - name: Compare candidate audio to approved first four
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess,hashlib,os
+          refs=[]
+          for i in range(1,5):
+              p=Path(f'/tmp/ref/audio/NAW{i:03d}.mp3')
+              refs.append((i,p,hashlib.sha256(p.read_bytes()).hexdigest(),float(subprocess.check_output(['ffprobe','-v','error','-show_entries','format=duration','-of','csv=p=0',str(p)]))))
+          print('=== REFERENCES ===')
+          for r in refs: print(r[0],r[2],r[3],r[1].stat().st_size)
+          candidates=[]
+          exts={'.mp3','.ogg','.wav','.m4a','.aac'}
+          for p in Path('/tmp/pkg').rglob('*'):
+              if p.is_file() and p.suffix.lower() in exts:
+                  try:
+                      d=float(subprocess.check_output(['ffprobe','-v','error','-show_entries','format=duration','-of','csv=p=0',str(p)],stderr=subprocess.DEVNULL))
+                  except Exception: continue
+                  candidates.append((p,d,p.stat().st_size))
+          print('CANDIDATE COUNT',len(candidates))
+          for ri,rp,rh,rd in refs:
+              near=sorted(candidates,key=lambda x:abs(x[1]-rd))[:12]
+              print(f'=== NEAREST TO REF {ri} duration={rd:.3f} ===')
+              for p,d,s in near:
+                  h=hashlib.sha256(p.read_bytes()).hexdigest()
+                  print(f'{d:.3f}\t{s}\tsha={h}\t{p}')
+          PY
