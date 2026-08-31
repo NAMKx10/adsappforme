@@ -1,0 +1,42 @@
+name: Nawawi Inspect Payload
+
+on:
+  push:
+    branches: [nawawi-apk-direct2]
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download uploaded payload
+        run: |
+          curl -L --fail --retry 3 -o Nawawi-Build-001.tar.gz https://raw.githubusercontent.com/Mirsad140/Mirsad001/main/Nawawi-Build-001.tar.gz
+          sha256sum Nawawi-Build-001.tar.gz
+          ls -lh Nawawi-Build-001.tar.gz
+      - name: Inspect archive
+        run: |
+          mkdir payload
+          tar -xzf Nawawi-Build-001.tar.gz -C payload
+          echo '--- FILE LIST ---'
+          find payload -maxdepth 3 -type f -printf '%p %s bytes\n' | sort
+          echo '--- AUDIO COUNT ---'
+          find payload/audio -type f 2>/dev/null | wc -l
+          echo '--- IMAGE COUNT ---'
+          find payload/images -type f 2>/dev/null | wc -l
+          echo '--- HTML CHECK ---'
+          python3 - <<'PY'
+          import pathlib,re,json,hashlib
+          p=pathlib.Path('payload/index.html')
+          t=p.read_text(encoding='utf-8')
+          print('html_bytes',p.stat().st_size)
+          m=re.search(r'const HADITHS = (\[.*?\]);\s*const TOTAL_HADITHS',t,re.S)
+          print('hadith_block',bool(m))
+          if m:
+              d=json.loads(m.group(1)); print('hadith_count',len(d)); print('numbers_ok',[h.get('number') for h in d]==list(range(1,43)))
+          print('http_count',len(re.findall(r'https?://',t)))
+          print('data_audio_count',t.count('data:audio'))
+          print('audio_refs',sorted(set(re.findall(r'audio/[^\"\'\s)]+',t)))[:100])
+          print('sha256',hashlib.sha256(p.read_bytes()).hexdigest())
+          PY
