@@ -9,31 +9,42 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install audio tools
+      - name: Install tools
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg
-      - name: Download approved build bundle
+      - name: Download approved bundle and full source audio
         run: |
           curl -L --fail --retry 3 -o /tmp/Nawawi-Build-001.tar.gz \
             https://raw.githubusercontent.com/Mirsad140/Mirsad001/main/Nawawi-Build-001.tar.gz
           mkdir -p /tmp/nawawi
           tar -xzf /tmp/Nawawi-Build-001.tar.gz -C /tmp/nawawi
-      - name: Inspect bundle
+          curl -L --fail --retry 3 -o /tmp/full.mp3 \
+            https://d1.islamhouse.com/data/ar/ih_sounds/chain_01/Almtoon_Al3lmeeh/AlArb3un_AlNuweh/ar_AlArb3un_AlNuweh_Duraihim.mp3
+      - name: Inspect timing model and source
         run: |
-          echo '=== AUDIO SHA256 / DURATION / BITRATE / TAGS ==='
+          echo '=== FULL SOURCE ==='
+          ls -lh /tmp/full.mp3
+          ffprobe -v error -show_entries format=duration,bit_rate:format_tags -of default=noprint_wrappers=1 /tmp/full.mp3 || true
+          echo '=== APPROVED TRACKS ==='
           for f in /tmp/nawawi/audio/*; do
             [ -f "$f" ] || continue
             echo "--- $(basename "$f") ---"
-            sha256sum "$f"
-            ffprobe -v error -show_entries format=duration,bit_rate:format_tags -of default=noprint_wrappers=1 "$f" || true
+            ffprobe -v error -show_entries format=duration,bit_rate -of default=noprint_wrappers=1 "$f" || true
           done
-          echo '=== MP3 HEADERS ==='
-          for f in /tmp/nawawi/audio/*; do
-            [ -f "$f" ] || continue
-            echo "--- $(basename "$f") ---"
-            file "$f" || true
-            strings -n 8 "$f" | head -n 20 || true
-          done
-          echo '=== INDEX AUDIO PATHS ==='
-          grep -o 'audio/[A-Za-z0-9_.-]*' /tmp/nawawi/index.html | sort -u || true
+          echo '=== JS OCCURRENCES AROUND sentenceUnits/audio ==='
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          t=Path('/tmp/nawawi/index.html').read_text(encoding='utf-8')
+          for pat in ['sentenceUnits','audio/NAW001.mp3','AUDIO','SYNC','timing','start','end']:
+              print('\n###',pat)
+              for m in list(re.finditer(re.escape(pat),t,re.I))[:8]:
+                  a=max(0,m.start()-300); b=min(len(t),m.end()+700)
+                  print(t[a:b].replace('\n',' ')[:1100])
+          print('\n=== CONST/LET NAMES containing sync/audio/sentence ===')
+          names=sorted(set(re.findall(r'(?:const|let|var)\s+([A-Za-z0-9_$]*(?:audio|sync|sentence)[A-Za-z0-9_$]*)\s*=',t,re.I)))
+          print('\n'.join(names))
+          PY
+          echo '=== SILENCE SCAN FULL SOURCE ==='
+          ffmpeg -hide_banner -i /tmp/full.mp3 -af silencedetect=noise=-38dB:d=0.6 -f null - 2>&1 | grep 'silence_' | head -n 300
