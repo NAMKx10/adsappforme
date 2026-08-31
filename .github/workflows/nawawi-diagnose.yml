@@ -13,54 +13,149 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg
-          python3 -m pip install --quiet numpy scipy
-      - name: Download approved bundle and full source audio
+      - name: Download approved bundle and source audio
         run: |
           curl -L --fail --retry 3 -o /tmp/Nawawi-Build-001.tar.gz https://raw.githubusercontent.com/Mirsad140/Mirsad001/main/Nawawi-Build-001.tar.gz
           mkdir -p /tmp/nawawi
           tar -xzf /tmp/Nawawi-Build-001.tar.gz -C /tmp/nawawi
           curl -L --fail --retry 3 -o /tmp/full.mp3 https://d1.islamhouse.com/data/ar/ih_sounds/chain_01/Almtoon_Al3lmeeh/AlArb3un_AlNuweh/ar_AlArb3un_AlNuweh_Duraihim.mp3
-      - name: Derive expected timings and match approved tracks
+          ffmpeg -hide_banner -i /tmp/full.mp3 -af silencedetect=noise=-38dB:d=0.45 -f null - 2> /tmp/silences.txt || true
+      - name: Derive 42 hadith boundaries from approved synchronization
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          import re,json,subprocess,numpy as np
-          from scipy.signal import correlate, correlation_lags
+          import re,json,math,subprocess
 
-          t=Path('/tmp/nawawi/index.html').read_text(encoding='utf-8')
-          m=re.search(r'const HADITHS = (\[.*?\]);\s*const TOTAL_HADITHS',t,re.S)
+          html=Path('/tmp/nawawi/index.html').read_text(encoding='utf-8')
+          m=re.search(r'const HADITHS = (\[.*?\]);\s*const TOTAL_HADITHS',html,re.S)
           assert m
           hs=json.loads(m.group(1))
-          print('=== EXPECTED TIMING ENDPOINTS ===')
+          assert len(hs)==42
+          fs=[]; sync_end=[]
           for h in hs:
-              st=max((x[1] for x in h.get('syncTimes',[]) if isinstance(x,list) and len(x)>1), default=0)
-              se=max((x.get('end',0) for x in h.get('sentenceUnits',[])),default=0)
-              print(f"{h['number']:02d}\t{h.get('audio','')}\tsyncEnd={st:.3f}\tsentenceEnd={se:.3f}")
+              st=h.get('syncTimes') or []
+              assert st and len(st[0])>=2, h['number']
+              fs.append(float(st[0][0]))
+              sync_end.append(max(float(x[1]) for x in st if isinstance(x,list) and len(x)>1))
 
-          def envelope(path, rate=8000, win=400):
-              raw=subprocess.check_output(['ffmpeg','-v','error','-i',str(path),'-ac','1','-ar',str(rate),'-f','f32le','-'])
-              x=np.frombuffer(raw,dtype='<f4')
-              n=len(x)//win
-              x=x[:n*win].reshape(n,win)
-              e=np.sqrt(np.mean(x*x,axis=1)+1e-10)
-              e=np.log(e+1e-4)
-              e=np.diff(e,prepend=e[0])
-              return e
-          full=envelope('/tmp/full.mp3')
-          step=.05
-          print('=== CORRELATION OFFSETS ===')
-          for i in range(1,5):
-              p=f'/tmp/nawawi/audio/NAW{i:03d}.mp3'
-              e=envelope(p)
-              a=max(1,int(len(e)*.15)); b=max(a+20,int(len(e)*.85))
-              q=e[a:b]
-              q=(q-q.mean())/(q.std()+1e-8)
-              f=(full-full.mean())/(full.std()+1e-8)
-              c=correlate(f,q,mode='valid',method='fft')
-              j=int(np.argmax(c))
-              score=float(c[j]/len(q))
-              start=j*step-a*step
-              print(f'NAW{i:03d}\tstart={start:.3f}\tend~={start+len(e)*step:.3f}\tscore={score:.4f}')
+          text=Path('/tmp/silences.txt').read_text(errors='ignore')
+          starts=[]; cands=[]
+          cur=None
+          for line in text.splitlines():
+              a=re.search(r'silence_start:\s*([0-9.]+)',line)
+              if a: cur=float(a.group(1))
+              b=re.search(r'silence_end:\s*([0-9.]+)\s*\|\s*silence_duration:\s*([0-9.]+)',line)
+              if b:
+                  en=float(b.group(1)); dur=float(b.group(2))
+                  cands.append((en,dur,cur if cur is not None else en-dur))
+                  cur=None
+          print('silence candidates:',len(cands))
+
+          # Exact speech onsets established from correlation of the first four approved files.
+          fixed=[76.3778,133.936,331.402,378.811]
+          # Snap to candidates so subsequent math uses the same detected boundaries.
+          snapped=[]
+          for x in fixed:
+              z=min(cands,key=lambda q:abs(q[0]-x))
+              assert abs(z[0]-x)<0.15,(x,z)
+              snapped.append(z)
+          fixed=[x[0] for x in snapped]
+
+          # Candidate boundaries from hadith 5 onward, only after hadith 4.
+          candidates=[x for x in cands if x[0] > fixed[-1]+1]
+
+          # Beam state: (cost, onset_index_in_candidates, chosen_list)
+          # Start clip 4 is fixed; derive the next onset based on exact local sync duration.
+          states=[(0.0,-1,[fixed[-1]])]
+          prev_onset=fixed[-1]
+          prev_start=prev_onset-fs[3]
+
+          # Iterate hadith numbers 5..42, selecting onset of each current hadith.
+          prev_states=[(0.0,prev_start,[fixed[-1]])]
+          for cur_idx in range(4,42):
+              # previous hadith index is cur_idx-1
+              pe=sync_end[cur_idx-1]
+              next_fs=fs[cur_idx]
+              prev_fs=fs[cur_idx-1]
+              new=[]
+              for cost,pstart,chosen in prev_states:
+                  last_onset=chosen[-1]
+                  # current clip start if candidate onset is chosen
+                  # Expected previous clip duration >= sync_end and normally has 0..4.5s trailing margin.
+                  lo=pstart+pe-0.10
+                  hi=pstart+pe+6.0
+                  for cand in candidates:
+                      onset,dur,_=cand
+                      if onset <= last_onset+0.2: continue
+                      cstart=onset-next_fs
+                      if cstart < lo: continue
+                      if cstart > hi: break
+                      trailing=(cstart-pstart)-pe
+                      # Prefer ~1.6 sec trailing room, but allow 0..4 sec cheaply.
+                      if 0.0 <= trailing <= 4.0:
+                          tc=((trailing-1.5)/3.0)**2
+                      else:
+                          tc=4.0+abs(trailing-1.5)*1.5
+                      # Hadith boundaries are generally marked by clearer pauses.
+                      pause_reward=min(dur,3.5)*0.42
+                      # Extra reward for pauses >=1s and >=2s.
+                      if dur>=1.0: pause_reward+=0.30
+                      if dur>=2.0: pause_reward+=0.45
+                      nc=cost+tc-pause_reward
+                      new.append((nc,cstart,chosen+[onset]))
+              if not new:
+                  raise RuntimeError(f'No candidates for hadith {cur_idx+1}')
+              new.sort(key=lambda x:x[0])
+              # Deduplicate by final onset, keep best, then beam.
+              ded=[]; seen=set()
+              for s in new:
+                  k=round(s[2][-1],3)
+                  if k in seen: continue
+                  seen.add(k); ded.append(s)
+                  if len(ded)>=160: break
+              prev_states=ded
+
+          full_dur=float(subprocess.check_output(['ffprobe','-v','error','-show_entries','format=duration','-of','default=nw=1:nk=1','/tmp/full.mp3']).decode().strip())
+          finals=[]
+          for cost,start42,chosen in prev_states:
+              remain=full_dur-start42
+              tail=remain-sync_end[41]
+              # Last track should contain its full sync plus modest tail/outro.
+              if tail < -0.1: continue
+              fc=cost+(max(0,tail-12)*2.0)+((tail-2.0)/7.0)**2
+              finals.append((fc,start42,chosen,tail))
+          assert finals,'No viable final path'
+          finals.sort(key=lambda x:x[0])
+          best=finals[0]
+          chosen=[fixed[0],fixed[1],fixed[2]]+best[2]  # h1,h2,h3 + list beginning h4
+          assert len(chosen)==42,len(chosen)
+
+          print('=== SELECTED HADITH AUDIO BOUNDARIES ===')
+          starts_clip=[]
+          for i,onset in enumerate(chosen):
+              st=onset-fs[i]
+              starts_clip.append(st)
+          for i in range(42):
+              end=starts_clip[i+1] if i<41 else full_dur
+              dur=end-starts_clip[i]
+              trailing=dur-sync_end[i]
+              # Find source pause duration associated with onset.
+              z=min(cands,key=lambda q:abs(q[0]-chosen[i]))
+              print(f'{i+1:02d}\tonset={chosen[i]:8.3f}\tclipStart={starts_clip[i]:8.3f}\tdur={dur:7.3f}\tsyncEnd={sync_end[i]:7.3f}\ttail={trailing:6.3f}\tpauseBefore={z[1]:5.3f}')
+          print('FINAL COST',best[0],'LAST TAIL',best[3])
+
+          # Validate known first four against exact approved durations.
+          known=[]
+          for i in range(4):
+              p=f'/tmp/nawawi/audio/NAW{i+1:03d}.mp3'
+              d=float(subprocess.check_output(['ffprobe','-v','error','-show_entries','format=duration','-of','default=nw=1:nk=1',p]).decode().strip())
+              known.append(d)
+              print(f'KNOWN {i+1}: exact={d:.3f} inferred_to_next={(starts_clip[i+1]-starts_clip[i]) if i<3 else -1:.3f}')
+
+          # Hard safety: every generated track 5-42 must be long enough for existing sync data.
+          for i in range(4,42):
+              end=starts_clip[i+1] if i<41 else full_dur
+              assert end-starts_clip[i] >= sync_end[i]-0.05,(i+1,end-starts_clip[i],sync_end[i])
+
+          Path('/tmp/boundaries.json').write_text(json.dumps({'onsets':chosen,'starts':starts_clip,'syncEnd':sync_end,'fullDuration':full_dur},ensure_ascii=False,indent=2))
           PY
-          echo '=== LONG SILENCES >= 2.0 sec ==='
-          ffmpeg -hide_banner -i /tmp/full.mp3 -af silencedetect=noise=-38dB:d=2.0 -f null - 2>&1 | grep 'silence_' || true
